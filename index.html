@@ -1,11 +1,326 @@
-<!DOCTYPE html>
-<html lang="uk">
+<!doctype html>
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Мій сайт</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Linear Programming — 2 variables (Reddy Mikkes style)</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:18px;color:#111}
+    h1{font-size:20px}
+    .row{display:flex;gap:12px;align-items:center}
+    label{display:block;font-size:13px}
+    input[type=number]{width:80px}
+    #constraints{margin-top:12px}
+    .constraint{display:flex;gap:6px;align-items:center;margin-bottom:6px}
+    button{padding:6px 10px;border-radius:6px;border:1px solid #bbb;background:#f6f6f6}
+    #canvasWrap{border:1px solid #ddd;margin-top:12px;padding:8px}
+    svg{width:600px;height:500px;background:#fff}
+    .info{margin-top:10px}
+    .small{font-size:13px;color:#555}
+  </style>
 </head>
 <body>
-    <h1>[Артьом Стобород]</h1>
+  <h1>Linear programming (2 variables) — visual solver</h1>
+
+  <div class="small">Use this page to enter an LP with two variables x1,x2 (non-negativity is assumed). Add/remove \u2264 constraints dynamically. Results and a plot will be shown.</div>
+
+  <div style="margin-top:12px">
+    <div class="row">
+      <label>Objective (maximize): Z = a*x1 + b*x2</label>
+    </div>
+    <div class="row">
+      <label>a: <input id="objA" type="number" value="3" step="any"></label>
+      <label>b: <input id="objB" type="number" value="2" step="any"></label>
+    </div>
+
+    <div id="constraints">
+      <h3>Constraints (c*x1 + d*x2 <= s)</h3>
+      <div id="list"></div>
+      <div style="margin-top:6px">
+        <button id="addBtn">Add constraint</button>
+        <button id="resetBtn">Reset example</button>
+      </div>
+    </div>
+
+    <div style="margin-top:12px">
+      <button id="solveBtn">Solve & Plot</button>
+    </div>
+
+    <div class="info">
+      <div id="result"></div>
+    </div>
+
+    <div id="canvasWrap">
+      <svg id="plot" viewBox="-0 -0 60 50" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+
+    <p class="small">Notes: page assumes x1,x2 &ge; 0 by default. If solution is infeasible or unbounded the page will report that.</p>
+  </div>
+
+<script>
+// --- Helper to manage constraints DOM ---
+const list = document.getElementById('list');
+function makeConstraintRow(c=1,d=1,s=10){
+  const wrap = document.createElement('div'); wrap.className='constraint';
+  const inC = document.createElement('input'); inC.type='number'; inC.step='any'; inC.value=c; inC.title='c';
+  const inD = document.createElement('input'); inD.type='number'; inD.step='any'; inD.value=d; inD.title='d';
+  const inS = document.createElement('input'); inS.type='number'; inS.step='any'; inS.value=s; inS.title='s';
+  const btn = document.createElement('button'); btn.textContent='Remove';
+  btn.onclick = ()=>{wrap.remove()};
+  wrap.appendChild(document.createTextNode('c:'));
+  wrap.appendChild(inC);
+  wrap.appendChild(document.createTextNode(' d:'));
+  wrap.appendChild(inD);
+  wrap.appendChild(document.createTextNode('  <= s:'));
+  wrap.appendChild(inS);
+  wrap.appendChild(btn);
+  return wrap;
+}
+function addConstraint(c,d,s){ list.appendChild(makeConstraintRow(c,d,s)); }
+
+// default example
+function resetExample(){ list.innerHTML='';
+  addConstraint(1,1,8);
+  addConstraint(2,1,10);
+  addConstraint(1,0,4);
+}
+
+document.getElementById('addBtn').addEventListener('click', ()=>addConstraint(1,1,5));
+document.getElementById('resetBtn').addEventListener('click', resetExample);
+resetExample();
+
+// --- Solve logic ---
+function readConstraints(){
+  const rows = Array.from(list.children);
+  const constraints = rows.map(r=>{
+    const inputs = r.querySelectorAll('input');
+    return {c: parseFloat(inputs[0].value), d: parseFloat(inputs[1].value), s: parseFloat(inputs[2].value)};
+  });
+  // add non-negativity: x1 >=0 -> -1*x1 <= 0 (i.e. -1*x1 + 0*x2 <= 0)
+  constraints.push({c:1,d:0,s:1e9}); // c*x1 + 0*x2 <= big  (we'll handle axes separately)
+  return constraints;
+}
+
+function computeIntersections(constraints){
+  const pts = [];
+  // include intersections with axes x1=0 and x2=0 by solving d*x2 <= s -> x2 = s/d if d>0 etc.
+  // We'll compute pairwise intersections of lines c1*x1 + d1*x2 = s1 and c2*x1 + d2*x2 = s2
+  for(let i=0;i<constraints.length;i++){
+    for(let j=i+1;j<constraints.length;j++){
+      const A = constraints[i], B = constraints[j];
+      const D = A.c*B.d - B.c*A.d;
+      if(Math.abs(D) < 1e-9) continue; // parallel
+      const x1 = (A.s*B.d - B.s*A.d)/D;
+      const x2 = (A.c*B.s - B.c*A.s)/D;
+      if(isFinite(x1) && isFinite(x2)) pts.push([x1,x2]);
+    }
+  }
+  // also points on axes from each constraint: intersection with x1=0 => x2 = s/d if d!=0
+  constraints.forEach(A=>{
+    if(Math.abs(A.d)>1e-9){ pts.push([0, A.s/A.d]); }
+    if(Math.abs(A.c)>1e-9){ pts.push([A.s/A.c, 0]); }
+  });
+  // also origin
+  pts.push([0,0]);
+  return pts;
+}
+
+function satisfiesAll(pt,constraints){
+  const [x1,x2] = pt;
+  for(const con of constraints){
+    if(x1*con.c + x2*con.d - con.s > 1e-7) return false;
+  }
+  // also require non-negativity x1,x2 >= -eps
+  if(x1 < -1e-7 || x2 < -1e-7) return false;
+  return true;
+}
+
+function uniquePts(pts){
+  const uniq=[]; for(const p of pts){
+    const key = p.map(v=>Math.abs(v)<1e-8?0:+v).map(v=>v.toFixed(8)).join(',');
+    if(!uniq.some(q=>q.map(v=>v.toFixed(8)).join(',')===key)) uniq.push(p);
+  }
+  return uniq;
+}
+
+function detectUnbounded(constraints,a,b){
+  // naive check: if there exists a direction v=(a,b) s.t. for all constraints c_i·v <= 0, then objective can grow along v
+  // We'll check dot(c_i,d) <= 0
+  const d = [a,b];
+  for(const con of constraints){
+    const dot = con.c*d[0] + con.d*d[1];
+    if(dot > 1e-9) return false; // blocked by at least one constraint
+  }
+  return true; // not blocked
+}
+
+function solve(){
+  const a = parseFloat(document.getElementById('objA').value);
+  const b = parseFloat(document.getElementById('objB').value);
+  // read constraint list (we won't include the artificial large constraint here)
+  const rows = Array.from(list.children);
+  const constraints = rows.map(r=>{
+    const inputs = r.querySelectorAll('input');
+    return {c: parseFloat(inputs[0].value), d: parseFloat(inputs[1].value), s: parseFloat(inputs[2].value)};
+  });
+  // add non-negativity as explicit constraints x1>=0 and x2>=0 treated as x1 >=0 -> -x1 <= 0; x2 >=0 -> -x2 <= 0
+  const consForChecking = constraints.slice();
+  consForChecking.push({c: -1, d:0, s:0});
+  consForChecking.push({c: 0, d:-1, s:0});
+
+  // build a set of lines (equalities) from original constraints for intersection computation
+  const lines = constraints.map(c=>({c:c.c,d:c.d,s:c.s}));
+  // Also include the non-negativity boundary lines x1=0 and x2=0
+  lines.push({c:1,d:0,s:0});
+  lines.push({c:0,d:1,s:0});
+
+  let pts = computeIntersections(lines);
+  pts = uniquePts(pts);
+  const feasible = pts.filter(p=>satisfiesAll(p,consForChecking));
+
+  const out = document.getElementById('result');
+  out.innerHTML = '';
+
+  if(feasible.length===0){
+    out.innerHTML = '<b>Infeasible</b>: no point satisfies all constraints.';
+    drawPlot(lines,[],null,consForChecking);
+    return;
+  }
+
+  // evaluate objective
+  let best = -Infinity; let bestPt = null;
+  for(const p of feasible){
+    const val = a*p[0] + b*p[1];
+    if(val > best + 1e-9){ best = val; bestPt = p; }
+  }
+
+  // naive unbounded check: if direction (a,b) is not blocked by any constraint and we have at least one feasible point -> unbounded
+  const unbounded = detectUnbounded(consForChecking,a,b);
+  if(unbounded){ out.innerHTML = '<b>Unbounded</b>: objective can increase indefinitely in direction of (a,b).';
+    drawPlot(lines,feasible,bestPt,consForChecking);
+    return;
+  }
+
+  // otherwise report best
+  out.innerHTML = `<b>Optimal</b>: x1 = ${bestPt[0].toFixed(6)}, x2 = ${bestPt[1].toFixed(6)}, Z = ${best.toFixed(6)}`;
+  drawPlot(lines,feasible,bestPt,consForChecking);
+}
+
+// --- Plotting ---
+const svg = document.getElementById('plot');
+function clearSVG(){ while(svg.firstChild) svg.removeChild(svg.firstChild); }
+
+function toView(pt, bbox){
+  // bbox = {xMin,xMax,yMin,yMax}
+  const [x,y]=pt;
+  const vx = (x - bbox.xMin)/(bbox.xMax - bbox.xMin) * 60;
+  const vy = 50 - (y - bbox.yMin)/(bbox.yMax - bbox.yMin) * 50;
+  return [vx,vy];
+}
+
+function computeBBox(points, lines){
+  // compute nice bbox covering feasible points and intersections
+  let xs = [], ys = [];
+  points.forEach(p=>{ xs.push(p[0]); ys.push(p[1]); });
+  lines.forEach(l=>{
+    // sample where line crosses axes
+    if(Math.abs(l.d) > 1e-9) xs.push(0), ys.push(l.s/l.d);
+    if(Math.abs(l.c) > 1e-9) xs.push(l.s/l.c), ys.push(0);
+  });
+  xs = xs.filter(v=>isFinite(v)); ys = ys.filter(v=>isFinite(v));
+  if(xs.length===0) xs=[0,10]; if(ys.length===0) ys=[0,10];
+  let xMin = Math.min(...xs), xMax = Math.max(...xs);
+  let yMin = Math.min(...ys), yMax = Math.max(...ys);
+  // pad
+  const xPad = Math.max(1,(xMax - xMin)*0.15);
+  const yPad = Math.max(1,(yMax - yMin)*0.15);
+  xMin -= xPad; xMax += xPad; yMin -= yPad; yMax += yPad;
+  // ensure positive range
+  if(xMin === xMax){ xMax = xMin + 10; }
+  if(yMin === yMax){ yMax = yMin + 10; }
+  // avoid negative range
+  return {xMin,xMax,yMin,yMax};
+}
+
+function drawPlot(lines, feasiblePoints, bestPt, constraints){
+  clearSVG();
+  const allPts = feasiblePoints.slice();
+  // union of feasible and sample points
+  lines.forEach(l=>{
+    if(Math.abs(l.d)>1e-9) allPts.push([0,l.s/l.d]);
+    if(Math.abs(l.c)>1e-9) allPts.push([l.s/l.c,0]);
+  });
+  const bbox = computeBBox(allPts,lines);
+
+  // draw axes
+  const axisGroup = document.createElementNS('http://www.w3.org/2000/svg','g');
+  const origin = toView([0,0],bbox);
+  const xAxis = document.createElementNS('http://www.w3.org/2000/svg','line');
+  xAxis.setAttribute('x1','0'); xAxis.setAttribute('y1',origin[1]); xAxis.setAttribute('x2','60'); xAxis.setAttribute('y2',origin[1]);
+  xAxis.setAttribute('stroke','#888'); axisGroup.appendChild(xAxis);
+  const yAxis = document.createElementNS('http://www.w3.org/2000/svg','line');
+  yAxis.setAttribute('x1',origin[0]); yAxis.setAttribute('y1','0'); yAxis.setAttribute('x2',origin[0]); yAxis.setAttribute('y2','50');
+  yAxis.setAttribute('stroke','#888'); axisGroup.appendChild(yAxis);
+  svg.appendChild(axisGroup);
+
+  // draw each constraint line
+  lines.forEach(l=>{
+    // compute two points on the line inside bbox
+    const pts = [];
+    // x = xMin -> solve for y
+    if(Math.abs(l.d) > 1e-9){ pts.push([bbox.xMin, (l.s - l.c*bbox.xMin)/l.d]); pts.push([bbox.xMax, (l.s - l.c*bbox.xMax)/l.d]); }
+    else { // vertical line c*x = s
+      const x = l.s / l.c; pts.push([x, bbox.yMin]); pts.push([x, bbox.yMax]); }
+    const p1 = toView(pts[0],bbox), p2 = toView(pts[1],bbox);
+    const line = document.createElementNS('http://www.w3.org/2000/svg','line');
+    line.setAttribute('x1',p1[0]); line.setAttribute('y1',p1[1]); line.setAttribute('x2',p2[0]); line.setAttribute('y2',p2[1]);
+    line.setAttribute('stroke','#2b7'); line.setAttribute('stroke-width','1'); line.setAttribute('stroke-opacity','0.9');
+    svg.appendChild(line);
+  });
+
+  // highlight feasible region by convex hull of feasiblePoints (if >2)
+  if(feasiblePoints.length >= 1){
+    // compute convex hull (gift wrapping) of feasiblePoints
+    const pts = feasiblePoints.map(p=>({x:p[0],y:p[1]}));
+    // remove duplicates
+    function cross(o,a,b){ return (a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x); }
+    pts.sort((p,q)=>p.x===q.x? p.y-q.y: p.x-q.x);
+    const lower = [];
+    for(const p of pts){ while(lower.length>=2 && cross(lower[lower.length-2], lower[lower.length-1], p) <= 0) lower.pop(); lower.push(p); }
+    const upper = [];
+    for(let i=pts.length-1;i>=0;i--){ const p=pts[i]; while(upper.length>=2 && cross(upper[upper.length-2], upper[upper.length-1], p) <= 0) upper.pop(); upper.push(p);} 
+    const hull = lower.slice(0,lower.length-1).concat(upper.slice(0,upper.length-1));
+    if(hull.length>=3){
+      const poly = document.createElementNS('http://www.w3.org/2000/svg','polygon');
+      poly.setAttribute('points', hull.map(p=>toView([p.x,p.y],bbox).join(',')).join(' '));
+      poly.setAttribute('fill','#88f'); poly.setAttribute('fill-opacity','0.18'); poly.setAttribute('stroke','#44c'); poly.setAttribute('stroke-width','1');
+      svg.appendChild(poly);
+    } else if(hull.length===2){
+      const l = document.createElementNS('http://www.w3.org/2000/svg','line');
+      l.setAttribute('x1',toView([hull[0].x,hull[0].y],bbox)[0]); l.setAttribute('y1',toView([hull[0].x,hull[0].y],bbox)[1]);
+      l.setAttribute('x2',toView([hull[1].x,hull[1].y],bbox)[0]); l.setAttribute('y2',toView([hull[1].x,hull[1].y],bbox)[1]);
+      l.setAttribute('stroke','#44c'); svg.appendChild(l);
+    }
+  }
+
+  // draw feasible points
+  feasiblePoints.forEach(p=>{
+    const v = toView(p,bbox);
+    const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx',v[0]); c.setAttribute('cy',v[1]); c.setAttribute('r',1.6); c.setAttribute('fill','#000'); svg.appendChild(c);
+  });
+
+  // draw best point
+  if(bestPt){
+    const v = toView(bestPt,bbox);
+    const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx',v[0]); c.setAttribute('cy',v[1]); c.setAttribute('r',3.6); c.setAttribute('fill','#e33'); svg.appendChild(c);
+  }
+}
+
+// attach
+document.getElementById('solveBtn').addEventListener('click', solve);
+
+</script>
 </body>
 </html>
